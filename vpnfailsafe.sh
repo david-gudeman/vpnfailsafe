@@ -1,5 +1,43 @@
 #!/usr/bin/env bash
 
+# USAGE:
+# Normal usage is to put this script in an openvpn config file (a *.ovpn file)
+# something like this:
+#
+#   script-security 2
+#   up /etc/openvpn/vpnfailsafe.sh
+#   down /etc/openvpn/vpnfailsafe.sh
+#
+# This will prevent DNS leaks and cause the vpn to fail closed, so that if
+# it goes down, the network becomes inaccessible. To reset the network to
+# make it accessible without the vpn again do this from the shell:
+#
+#   sudo /etc/openvpn/vpnfailsafe.sh reset
+
+readonly hosts_beg="# VPNFAILSAFE BEGIN"
+readonly hosts_end="# VPNFAILSAFE END"
+
+# The following intercepts a command line arg 'reset' and short-circuits the
+# normal config operation of the script to work as a command-line
+# script and reset the /etc/hosts file and firewall.
+if [[ "$1" == reset ]] ; then
+    # Delete added hosts
+    if (grep -q "$hosts_beg" /etc/hosts); then
+        sed -e "/^$beg/,/^$end/d" /etc/hosts >/etc/hosts/.vpnfailsafe
+        chmod --reference=/etc/hosts /etc/hosts.vpnfailsafe
+        mv /etc/hosts.vpnfailsafe /etc/hosts
+    fi    
+    # Delete firewall entries
+    for chain in INPUT OUTPUT FORWARD; do
+        if iptables -C "$chain" -j "VPNFAILSAFE_$chain" 2>/dev/null; then
+            iptables -D "$chain" -j "VPNFAILSAFE_$chain"
+            iptables -F "VPNFAILSAFE_$chain"
+            iptables -X "VPNFAILSAFE_$chain"
+        fi
+    done
+    exit 0
+fi
+
 set -eEo pipefail
 
 readonly dev
@@ -31,8 +69,8 @@ update_hosts() {
     if remote_entries="$(getent -s dns hosts "${cnf_remote_domains[@]:-}"|grep -v :)"; then
         local -r beg="# VPNFAILSAFE BEGIN" end="# VPNFAILSAFE END"
         {
-            sed -e "/^$beg/,/^$end/d" /etc/hosts
-            echo -e "$beg\n$remote_entries\n$end"
+            sed -e "/^$hosts_beg/,/^$hosts_end/d" /etc/hosts
+            echo -e "$hosts_beg\n$remote_entries\n$hosts_end"
         } >/etc/hosts.vpnfailsafe
         chmod --reference=/etc/hosts /etc/hosts.vpnfailsafe
         mv /etc/hosts.vpnfailsafe /etc/hosts
@@ -75,11 +113,11 @@ update_resolv() {
                 esac
             done
             if [[ -n "$ns" ]]; then
-                echo -e "${domains/ /search }\n${ns// /$'\n'nameserver }"|resolvconf -xa "$dev"
+                echo -e "${domains/ /search }\n${ns// /$'\n'nameserver }"|/sbin/resolvconf -a "$dev"
             else
                 echo "$0: WARNING: no DNS was pushed by the VPN server, this could cause a DNS leak" >&2
             fi;;
-        down) resolvconf -fd "$dev" 2>/dev/null || true;;
+        down) /sbin/resolvconf -d "$dev" 2>/dev/null || true;;
     esac
 }
 
